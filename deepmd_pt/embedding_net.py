@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from deepmd_pt import env
-from deepmd_pt.descriptor import SmoothDescriptor
+from deepmd_pt.descriptor import SmoothDescriptor, SmoothDescriptorCPP
 
 
 def analyze_descrpt(matrix, ndescrpt, natoms):
@@ -230,7 +230,7 @@ class EmbeddingNet(torch.nn.Module):
         - `torch.Tensor`: descriptor matrix with shape [nframes, natoms[0]*self.filter_neuron[-1]*self.axis_neuron].
         '''
         nall = natoms[0]
-        dmatrix = SmoothDescriptor.apply(
+        dmatrix = SmoothDescriptorCPP.apply(
             coord, atype, natoms, box,
             self.mean, self.stddev, self.deriv_stddev,
             self.rcut, self.rcut_smth, self.sec

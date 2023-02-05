@@ -1,6 +1,8 @@
 import argparse
 import json
 import logging
+import sys
+sys.path.append("/mnt/vepfs/users/yaosk/code/deepmd_on_pytorch_dev")
 
 from deepmd_pt import training
 

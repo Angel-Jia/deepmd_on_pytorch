@@ -395,6 +395,28 @@ class SmoothDescriptor(torch.autograd.Function):
         assert 9 == box.shape[1], 'Box size is invalid!'
         assert len(sec) == natoms.shape[0] - 2, 'Element type mismatches!'
 
+        # print(coord.shape)
+        # print(atype.shape)
+        # print(natoms.shape)
+        # print(box.shape)
+        # print(mean.shape)
+        # print(stddev.shape)
+        # print(deriv_stddev.shape)
+        # print(rcut)
+        # print(rcut_smth)
+        # print(sec)
+        #
+        # (3, 576)
+        # (3, 192)
+        # (4,)
+        # (3, 9)
+        # (2, 138, 4)
+        # (2, 138, 4)
+        # (2, 138, 4, 3)
+        # 6.0
+        # 0.5
+        # [ 46 138]
+
         descriptor_list = []
         deriv_list = []
         nlist_list = []
@@ -436,8 +458,168 @@ class SmoothDescriptor(torch.autograd.Function):
         - atom_force: Shape is [nframes, natoms[1]*3].
         '''
         deriv_list, nlist_list, natoms = ctx.saved_tensors
+        # print(descriptor_grad.shape)
+        # print(deriv_list.shape)
+        # print(nlist_list.shape)
+        # print(natoms.shape)
+        # print(natoms)
+        # torch.Size([3, 105984])
+        # torch.Size([3, 317952])
+        # torch.Size([3, 26496])
+        # torch.Size([4])
+        # tensor([192, 192,  64, 128], dtype=torch.int32)
         force = SmoothDescriptorBackward.apply(descriptor_grad, deriv_list, nlist_list, natoms)
         return force, None, None, None, None, None, None, None, None, None
 
 
-__all__ = ['SmoothDescriptor']
+lib_path = r"/mnt/vepfs/users/yaosk/code/deepmd_on_pytorch_dev/source/build/op/libop_abi_pt.so"
+torch.ops.load_library(lib_path)
+
+class ProdForceFunc(torch.autograd.Function):
+    forward_op = torch.ops.prod_force.prod_force_se_a
+    backward_op = torch.ops.prod_force.prod_force_se_a_grad
+
+    @staticmethod
+    def forward(ctx, net_deriv_reshape, descrpt_deriv, nlist, natoms, n_a_sel, n_r_sel):
+        ctx.save_for_backward(net_deriv_reshape, descrpt_deriv, nlist, natoms)
+        ctx.n_a_sel = n_a_sel
+        ctx.n_r_sel = n_r_sel
+        force = ProdForceFunc.forward_op(net_deriv_reshape, descrpt_deriv, nlist, natoms)
+        return force
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        net_deriv_reshape, descrpt_deriv, nlist, natoms = ctx.saved_tensors
+        grad_net = ProdForceFunc.backward_op(grad_output, net_deriv_reshape, descrpt_deriv,
+                                         nlist, natoms, ctx.n_a_sel, ctx.n_r_sel)
+        return grad_net, None, None, None, None, None
+
+
+###########################################################################
+# CPP Imp
+###########################################################################
+
+default_mesh = torch.tensor([0, 0, 0, 2, 2, 2], dtype=torch.int32, requires_grad=False)
+class SmoothDescriptorCPP(torch.autograd.Function):
+    prod_env_mat_a_forward = torch.ops.prod_env_mat.prod_env_mat_a
+    '''Function wrapper for `se_a` descriptor.'''
+
+    @staticmethod
+    def forward(ctx,
+        coord, atype, natoms, box,  # 动态的 torch.Tensor 或 numpy.ndarray
+        mean, stddev, deriv_stddev, # 静态的 numpy.ndarray
+        rcut, rcut_smth, sec  # 静态的 Python 对象
+    ):
+        '''Generate descriptor matrix from atom coordinates and other context.
+
+        Args:
+        - coord: Batched atom coordinates with shape [nframes, natoms[1]*3].
+        - atype: Batched atom types with shape [nframes, natoms[1]].
+        - natoms: Batched atom statisics with shape [len(sec)+2].
+        - box: Batched simulation box with shape [nframes, 9].
+        - mean: Average value of descriptor per element type with shape [len(sec), nnei, 4].
+        - stddev: Standard deviation of descriptor per element type with shape [len(sec), nnei, 4].
+        - deriv_stddev:  StdDev of descriptor derivative per element type with shape [len(sec), nnei, 4, 3].
+        - rcut: Cut-off radius.
+        - rcut_smth: Smooth hyper-parameter for pair force & energy.
+        - sec: Cumulative count of neighbors by element.
+
+        Returns:
+        - descriptor: Shape is [nframes, natoms[1]*nnei*4].
+        '''
+        coord = coord.detach().numpy()
+        nnei = sec[-1]  # 总的邻居数量
+        nframes = coord.shape[0]  # 样本数量
+        nloc, nall = natoms[0], natoms[1]  # 原子数量和包含 Ghost 原子的数量
+        assert nloc == nall, 'In PBC, `nloc` === `nall`!'
+        assert nframes == atype.shape[0], 'Batch size differs!'
+        assert nframes == box.shape[0], 'Batch size differs!'
+        assert nall*3 == coord.shape[1], 'Atom count differs!'
+        assert nall == atype.shape[1], 'Atom count differs!'
+        assert 9 == box.shape[1], 'Box size is invalid!'
+        assert len(sec) == natoms.shape[0] - 2, 'Element type mismatches!'
+        
+        rcut_a = -1
+        sel_a = [sec[0]]
+        for i in range(1, len(sec)):
+            sel_a.append(sec[i] - sec[0])
+        sel_r = [ 0 for ii in range(len(sel_a)) ]
+        
+        coord = torch.from_numpy(coord)
+        atype = torch.from_numpy(atype)
+        natoms = torch.from_numpy(natoms)
+        box = torch.from_numpy(box)
+        
+        assert coord.dtype == torch.float64
+        assert box.dtype == torch.float64, box.dtype
+
+        assert atype.dtype == torch.int32
+        assert natoms.dtype == torch.int32 and natoms.shape[0] == 4 # hard-coding
+        assert default_mesh.dtype == torch.int32
+            
+        sel_a = torch.tensor([46, 92], dtype=torch.int32, requires_grad=False)
+        sel_r = torch.tensor([0, 0], dtype=torch.int32, requires_grad=False)
+        
+        mean = torch.tensor(mean).reshape((mean.shape[0], -1))
+        stddev = torch.tensor(stddev).reshape((mean.shape[0], -1))
+
+        stat_descrpt, descrpt_deriv, rij, nlist \
+            = SmoothDescriptorCPP.prod_env_mat_a_forward(coord, atype, natoms, box, default_mesh, mean, stddev, rcut_a, rcut, rcut_smth, sel_a, sel_r)
+        ctx.save_for_backward(descrpt_deriv, nlist, natoms)
+        return stat_descrpt
+
+    @staticmethod
+    def backward(ctx, descriptor_grad):
+        '''Compute XYZ forces on atoms.
+
+        Args:
+        - descriptor_grad: Shape is [nframes, natoms[1]*nnei*4].
+
+        Returns:
+        - atom_force: Shape is [nframes, natoms[1]*3].
+        '''
+        descrpt_deriv, nlist, natoms = ctx.saved_tensors
+        force = SmoothDescriptorBackwardCPP.apply(descriptor_grad, descrpt_deriv, nlist, natoms)
+        return force, None, None, None, None, None, None, None, None, None
+
+
+class SmoothDescriptorBackwardCPP(torch.autograd.Function):
+    forward_op = torch.ops.prod_force.prod_force_se_a
+    backward_op = torch.ops.prod_force.prod_force_se_a_grad
+    '''Function wrapper for force computation.'''
+
+    @staticmethod
+    def forward(ctx, descriptor_grad, deriv_list, nlist_list, natoms):
+        '''Compute atom force with descriptor gradient.
+
+        Args:
+        - descriptor_grad: Shape is [nframes, natoms[0]*nnei*4].
+        - deriv_list: Shape is [nframes, natoms[0]*nnei*4*3].
+        - nlist_list: Shape is [nframes, natoms[0]*nnei].
+        - natoms: Shape is [ntypes+2].
+
+        Returns:
+        - force: Shape is [nframes, natoms[1]*3].
+        '''
+        ctx.save_for_backward(descriptor_grad, deriv_list, nlist_list, natoms)
+        force = ProdForceFunc.forward_op(descriptor_grad, deriv_list, nlist_list, natoms)
+        return force
+
+    @staticmethod
+    def backward(ctx, force_grad):
+        '''Compute gradient of force over descriptor gradient.
+
+        Args:
+        - force_grad: Shape is [nframes, natoms[1]*3].
+
+        Returns:
+        - descriptor_grad_grad: Shape is [nframes, natoms[0]*nnei*4].
+        '''
+        net_deriv_reshape, descrpt_deriv, nlist, natoms = ctx.saved_tensors
+        grad_net = ProdForceFunc.backward_op(force_grad, net_deriv_reshape, descrpt_deriv,
+                                         nlist, natoms, 138, 0)
+        return grad_net, None, None, None, None, None, None, None, None, None
+
+
+__all__ = ['SmoothDescriptor', 'SmoothDescriptorCPP']
+
