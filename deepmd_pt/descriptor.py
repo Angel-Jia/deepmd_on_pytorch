@@ -5,6 +5,7 @@ import torch
 from collections import namedtuple
 
 from deepmd_pt import env
+import os
 
 
 NeighborInfo = namedtuple('NeighborInfo', [
@@ -500,6 +501,9 @@ class ProdForceFunc(torch.autograd.Function):
 ###########################################################################
 
 default_mesh = torch.tensor([0, 0, 0, 2, 2, 2], dtype=torch.int32, requires_grad=False)
+if os.getenv('USE_CUDA'):
+    default_mesh = default_mesh.cuda()
+    
 class SmoothDescriptorCPP(torch.autograd.Function):
     prod_env_mat_a_forward = torch.ops.prod_env_mat.prod_env_mat_a
     '''Function wrapper for `se_a` descriptor.'''
@@ -527,7 +531,7 @@ class SmoothDescriptorCPP(torch.autograd.Function):
         Returns:
         - descriptor: Shape is [nframes, natoms[1]*nnei*4].
         '''
-        coord = coord.detach().numpy()
+        coord = coord.detach()
         nnei = sec[-1]  # 总的邻居数量
         nframes = coord.shape[0]  # 样本数量
         nloc, nall = natoms[0], natoms[1]  # 原子数量和包含 Ghost 原子的数量
@@ -545,10 +549,12 @@ class SmoothDescriptorCPP(torch.autograd.Function):
             sel_a.append(sec[i] - sec[0])
         sel_r = [ 0 for ii in range(len(sel_a)) ]
         
-        coord = torch.from_numpy(coord)
-        atype = torch.from_numpy(atype)
-        natoms = torch.from_numpy(natoms)
-        box = torch.from_numpy(box)
+        # coord = torch.from_numpy(coord)
+        # atype = torch.from_numpy(atype)
+        # natoms = torch.from_numpy(natoms)
+        # box = torch.from_numpy(box)
+        sel_a = torch.tensor([46, 92], dtype=torch.int32, requires_grad=False)
+        sel_r = torch.tensor([0, 0], dtype=torch.int32, requires_grad=False)
         
         assert coord.dtype == torch.float64
         assert box.dtype == torch.float64, box.dtype
@@ -556,12 +562,25 @@ class SmoothDescriptorCPP(torch.autograd.Function):
         assert atype.dtype == torch.int32
         assert natoms.dtype == torch.int32 and natoms.shape[0] == 4 # hard-coding
         assert default_mesh.dtype == torch.int32
-            
-        sel_a = torch.tensor([46, 92], dtype=torch.int32, requires_grad=False)
-        sel_r = torch.tensor([0, 0], dtype=torch.int32, requires_grad=False)
         
         mean = torch.tensor(mean).reshape((mean.shape[0], -1))
         stddev = torch.tensor(stddev).reshape((mean.shape[0], -1))
+        if os.getenv('USE_CUDA'):
+            mean = mean.cuda()
+            stddev = stddev.cuda()
+
+        # print(coord.shape, type(coord), coord.dtype, coord.is_cuda)
+        # print(atype.shape, type(atype), atype.dtype, atype.is_cuda)
+        # print(natoms.shape, type(natoms), natoms.dtype, natoms.is_cuda)
+        # print(box.shape, type(box), box.dtype, box.is_cuda)
+        # print(default_mesh.shape, type(default_mesh), default_mesh.dtype, default_mesh.is_cuda)
+        # print(mean.shape, type(mean), mean.dtype, mean.is_cuda)
+        # print(stddev.shape, type(stddev), stddev.dtype, stddev.is_cuda)
+        # print(rcut_a, type(rcut_a))
+        # print(rcut, type(rcut))
+        # print(rcut_smth, type(rcut_smth))
+        # print(type(sel_a), sel_a, sel_a.dtype, sel_a.is_cuda)
+        # print(type(sel_r), sel_r, sel_r.dtype, sel_r.is_cuda)
 
         stat_descrpt, descrpt_deriv, rij, nlist \
             = SmoothDescriptorCPP.prod_env_mat_a_forward(coord, atype, natoms, box, default_mesh, mean, stddev, rcut_a, rcut, rcut_smth, sel_a, sel_r)
